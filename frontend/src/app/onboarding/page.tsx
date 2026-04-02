@@ -45,6 +45,8 @@ export default function OnboardingPage() {
         try {
             const birthDate = `${form.birthYear}-01-01`;
             const userId = localStorage.getItem("user_id");
+            const userStr = localStorage.getItem("user");
+            const savedUser = userStr ? JSON.parse(userStr) : null;
 
             let user;
             if (userId) {
@@ -73,7 +75,8 @@ export default function OnboardingPage() {
                     activity_level: "moderate",
                     training_days_per_week: form.trainingDays,
                 });
-                userStorage.setUserId(user.id);
+                localStorage.setItem("user_id", user.id);
+                localStorage.setItem("user", JSON.stringify(user));
             }
 
             setLoadingText("AI 正在计算基础代谢...");
@@ -83,23 +86,38 @@ export default function OnboardingPage() {
             const today = new Date().toISOString().split("T")[0];
 
             // 2. Generate Plan
-            await planApi.create({
-                user_id: user.id,
-                name: "智能生成计划",
-                start_date: today,
-                cycle_length_days: 7,
-                num_cycles: 4,
-                goal_deficit: form.goal === "fat_loss" ? -500 : form.goal === "muscle_gain" ? 300 : 0,
-                high_carb_days: Math.min(form.trainingDays, 3),
-                medium_carb_days: Math.max(0, form.trainingDays - 3),
-                low_carb_days: 7 - form.trainingDays,
-            });
+            try {
+                await planApi.create({
+                    user_id: String(user.id),
+                    name: "智能生成计划",
+                    start_date: today,
+                    cycle_length_days: 7,
+                    num_cycles: 4,
+                    goal_deficit: form.goal === "fat_loss" ? -500 : form.goal === "muscle_gain" ? 300 : 0,
+                    high_carb_days: Math.min(form.trainingDays, 3),
+                    medium_carb_days: Math.max(0, form.trainingDays - 3),
+                    low_carb_days: 7 - form.trainingDays,
+                });
+            } catch (planError: any) {
+                console.error("Plan creation error:", planError);
+                throw new Error(planError.message || "创建计划失败");
+            }
 
             setLoadingText("系统准备就绪!");
             await new Promise(r => setTimeout(r, 500));
+            
+            // Save user info before redirecting
+            const updatedUser = {
+                id: user.id,
+                name: user.name,
+                email: user.email || '',
+            };
+            localStorage.setItem("user", JSON.stringify(updatedUser));
+            localStorage.setItem("user_id", String(user.id));
+            
             router.push("/");
         } catch (err: any) {
-            console.error(err);
+            console.error("Submission error:", err);
             setError(err.message || "生成计划失败，请稍后重试");
             setLoading(false);
         }

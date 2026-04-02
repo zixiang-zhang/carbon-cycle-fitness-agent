@@ -30,12 +30,15 @@ export default function RegisterPage() {
                 email,
                 password,
                 name,
-                // Fill defaults required by schema
                 gender: "male",
                 birth_date: "1990-01-01",
                 height_cm: 170,
                 weight_kg: 70,
-                goal: "maintenance"
+                target_weight_kg: 70,
+                goal: "maintenance",
+                activity_level: "moderate",
+                training_days_per_week: 4,
+                dietary_preferences: []
             };
 
             const user = await authApi.register(registerData);
@@ -44,8 +47,14 @@ export default function RegisterPage() {
             const loginResponse = await authApi.login({ email, password });
 
             localStorage.setItem("auth_token", loginResponse.access_token);
-            localStorage.setItem("user_id", loginResponse.user_id);
-            localStorage.setItem("user_name", loginResponse.user_name);
+            localStorage.setItem("user_id", user.id);
+            localStorage.setItem("user_name", user.name);
+            localStorage.setItem("user", JSON.stringify({
+                id: user.id,
+                name: user.name,
+                email: user.email,
+                token: loginResponse.access_token
+            }));
 
             // Redirect to onboarding to complete profile
             window.location.href = "/onboarding";
