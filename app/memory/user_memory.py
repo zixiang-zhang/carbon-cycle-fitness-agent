@@ -6,8 +6,9 @@ Manages persistent storage of user preferences, history, and state.
 管理用户偏好、历史记录和状态的持久存储
 """
 
-from abc import ABC, abstractmethod
+import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional, Protocol
 from uuid import UUID
 
@@ -98,6 +99,38 @@ class InMemoryStore:
     async def delete(self, key: str) -> None:
         """Delete value by key."""
         self._store.pop(key, None)
+
+
+class FileMemoryStore:
+    """Simple file-backed JSON storage for memory persistence."""
+
+    def __init__(self, root_dir: Optional[Path] = None) -> None:
+        self.root_dir = root_dir or Path("data/memory")
+        self.root_dir.mkdir(parents=True, exist_ok=True)
+
+    def _path_for_key(self, key: str) -> Path:
+        safe_key = key.replace(":", "__")
+        return self.root_dir / f"{safe_key}.json"
+
+    async def get(self, key: str) -> Optional[dict[str, Any]]:
+        path = self._path_for_key(key)
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    async def set(
+        self,
+        key: str,
+        value: dict[str, Any],
+        ttl: Optional[int] = None,
+    ) -> None:
+        path = self._path_for_key(key)
+        path.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    async def delete(self, key: str) -> None:
+        path = self._path_for_key(key)
+        if path.exists():
+            path.unlink()
 
 
 class UserMemory:
@@ -215,7 +248,6 @@ def get_user_memory() -> UserMemory:
     """
     global _user_memory
     if _user_memory is None:
-        # Default to in-memory store; replace with Redis/DB in production
-        store = InMemoryStore()
+        store = FileMemoryStore()
         _user_memory = UserMemory(store)
     return _user_memory

@@ -1,34 +1,46 @@
+"""
+Agent 相关接口。
+
+这里暴露了两种运行 LangGraph 工作流的方式：
+1. `/run`：同步执行，适合调试、排查或直接查看一次完整结果。
+2. `/trigger` + `/status/{run_id}`：异步触发 + 轮询结果，适合前端页面调用。
+"""
+
 from typing import Any, Optional
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent import run_agent
-from app.core.database import get_db
-from app.db.db_storage import DatabaseStorage
+from app.agent.context import build_active_plan_context, build_logs_context, build_user_context
+from app.core.database import get_db, get_session_factory
 from app.core.logging import get_logger
+from app.db.db_storage import DatabaseStorage
 
 logger = get_logger(__name__)
 router = APIRouter()
 
 
 class AgentTriggerRequest(BaseModel):
-    """Request to trigger agent run."""
+    """手动触发 Agent 时使用的请求体。"""
+
     user_id: str
     trigger: str = "manual"
 
 
 class AgentRunResponse(BaseModel):
-    """Response from agent run."""
+    """异步提交 Agent 任务后立即返回的最小响应。"""
+
     run_id: str
     status: str
     message: str
 
 
 class AgentResultResponse(BaseModel):
-    """Detailed agent result."""
+    """同步接口和异步轮询接口共用的结果结构。"""
+
     run_id: str
     status: str
     planner_output: Optional[dict[str, Any]] = None
@@ -39,114 +51,41 @@ class AgentResultResponse(BaseModel):
     error: Optional[str] = None
 
 
-# Store for async results
+# 这个缓存故意做得很轻，只用于保存“接口触发的异步运行结果”。
+# 它不是长期持久化存储，真正的运行审计由 AgentMemory 负责。
 _agent_results: dict[str, dict[str, Any]] = {}
 
 
-def _build_user_context(user) -> dict[str, Any]:
-    """Build user context from UserProfile."""
-    return {
-        "user_id": str(user.id),
-        "name": user.name,
-        "gender": user.gender.value if hasattr(user.gender, 'value') else user.gender,
-        "age": user.calculate_age() if hasattr(user, 'calculate_age') else 30,
-        "height_cm": user.height_cm,
-        "weight_kg": user.weight_kg,
-        "target_weight_kg": getattr(user, 'target_weight_kg', user.weight_kg - 5) or user.weight_kg - 5,
-        "goal": user.goal.value if hasattr(user.goal, 'value') else user.goal,
-        "activity_level": user.activity_level.value if hasattr(user.activity_level, 'value') else user.activity_level,
-        "training_days": getattr(user, 'training_days_per_week', 4),
-        "tdee": user.calculate_tdee() if hasattr(user, 'calculate_tdee') else 2000,
-        "dietary_preferences": ", ".join(getattr(user, 'dietary_preferences', [])) or "无特殊限制",
-    }
+async def _run_agent_for_user(user_id: str, trigger: str, storage: DatabaseStorage) -> dict[str, Any]:
+    """
+    读取用户运行 Agent 所需的数据，并执行 LangGraph 工作流。
 
+    这里故意把流程收敛成一个帮助函数，方便理解接口主链路：
+    取用户 -> 取当前计划/最近日志 -> 组装 Agent 上下文 -> 运行图。
+    """
+    user = await storage.get_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-def _build_plan_context(plan) -> dict[str, Any]:
-    """Build plan context from CarbonCyclePlan."""
-    if not plan:
-        return {}
-    
-    # Get today's plan day if available
-    from datetime import date
-    today = date.today()
-    
-    today_day = None
-    for day in plan.days:
-        if day.date == today:
-            today_day = day
-            break
-    
-    if today_day:
-        return {
-            "plan_id": str(plan.id),
-            "start_date": plan.start_date.isoformat(),
-            "current_day": (today - plan.start_date).days + 1,
-            "day_type": today_day.day_type.value if hasattr(today_day.day_type, 'value') else today_day.day_type,
-            "target_calories": today_day.target_calories,
-            "target_protein": today_day.macros.protein_g,
-            "target_carbs": today_day.macros.carbs_g,
-            "target_fat": today_day.macros.fat_g,
-            "cycle_length": len(plan.days),
-        }
-    
-    return {
-        "plan_id": str(plan.id),
-        "start_date": plan.start_date.isoformat(),
-        "target_calories": plan.average_daily_calories,
-        "cycle_length": len(plan.days),
-    }
+    plan = await storage.get_active_plan(user_id)
+    logs = await storage.get_user_logs(user_id, limit=7)
 
-
-def _build_logs_context(logs) -> list[dict[str, Any]]:
-    """Build logs context from DietLog list."""
-    return [
-        {
-            "date": log.date.isoformat(),
-            "actual_calories": log.total_calories or 0,
-            "actual_protein": log.total_protein or 0,
-            "actual_carbs": log.total_carbs or 0,
-            "actual_fat": log.total_fat or 0,
-            "training_completed": log.training_completed or False,
-            "meal_count": len(log.meals) if log.meals else 0,
-        }
-        for log in logs
-    ]
+    return await run_agent(
+        user_id=user_id,
+        trigger=trigger,
+        user_context=build_user_context(user),
+        plan_context=build_active_plan_context(plan),
+        logs=build_logs_context(logs),
+    )
 
 
 @router.post("/run", response_model=AgentResultResponse)
-async def run_agent_sync(request: AgentTriggerRequest, db: AsyncSession = Depends(get_db)) -> AgentResultResponse:
-    """
-    Run agent synchronously with real user data.
-    同步运行 Agent，使用真实用户数据
-    """
-    storage = DatabaseStorage(db)
-    
-    # Get user
-    user = await storage.get_user(request.user_id)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    # Get active plan
-    plan = await storage.get_active_plan(request.user_id)
-    
-    # Get recent logs
-    logs = await storage.get_user_logs(request.user_id, limit=7)
-    
-    # Build contexts
-    user_context = _build_user_context(user)
-    plan_context = _build_plan_context(plan)
-    logs_context = _build_logs_context(logs)
-    
-    logger.info(f"Running agent for user {request.user_id} with {len(logs)} logs")
-    
-    result = await run_agent(
-        user_id=str(request.user_id),
-        trigger=request.trigger,
-        user_context=user_context,
-        plan_context=plan_context,
-        logs=logs_context,
-    )
-    
+async def run_agent_sync(
+    request: AgentTriggerRequest,
+    db: AsyncSession = Depends(get_db),
+) -> AgentResultResponse:
+    """同步运行 Agent，并在一个响应里直接返回完整结果。"""
+    result = await _run_agent_for_user(request.user_id, request.trigger, DatabaseStorage(db))
     return AgentResultResponse(
         run_id=result.get("run_id", ""),
         status=result.get("status", "unknown"),
@@ -163,48 +102,38 @@ async def run_agent_sync(request: AgentTriggerRequest, db: AsyncSession = Depend
 async def trigger_agent_async(
     request: AgentTriggerRequest,
     background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ) -> AgentRunResponse:
-    """
-    Trigger agent run asynchronously.
-    异步触发 Agent 运行
-    """
+    """后台启动一次 Agent 运行，并立即返回可轮询的 run_id。"""
     storage = DatabaseStorage(db)
-    
-    # Verify user exists
     if not await storage.get_user(request.user_id):
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     run_id = str(uuid4())
     _agent_results[run_id] = {"status": "running"}
-    
-    async def run_in_background():
-        # Note: Background tasks need their own DB session if they run after the request finishes.
-        # But for now, we'll try using the injected session or a new one.
-        # It's safer to use a new session in background tasks.
-        from app.core.database import get_session_factory
-        factory = get_session_factory()
-        async with factory() as session:
+
+    async def run_in_background() -> None:
+        """
+        后台任务必须自己重新创建数据库会话。
+
+        原因是：FastAPI 请求结束后，原本注入的 db session 很可能已经被关闭。
+        如果后台协程继续复用请求里的 session，就容易出现连接失效或事务异常。
+        """
+        session_factory = get_session_factory()
+        async with session_factory() as session:
             try:
-                bg_storage = DatabaseStorage(session)
-                user = await bg_storage.get_user(request.user_id)
-                plan = await bg_storage.get_active_plan(request.user_id)
-                logs = await bg_storage.get_user_logs(request.user_id, limit=7)
-                
-                result = await run_agent(
-                    user_id=str(request.user_id),
-                    trigger=request.trigger,
-                    user_context=_build_user_context(user),
-                    plan_context=_build_plan_context(plan),
-                    logs=_build_logs_context(logs),
+                result = await _run_agent_for_user(
+                    request.user_id,
+                    request.trigger,
+                    DatabaseStorage(session),
                 )
                 _agent_results[run_id] = result
-            except Exception as e:
-                logger.error(f"Background agent run failed: {e}")
-                _agent_results[run_id] = {"status": "error", "error": str(e)}
-    
+            except Exception as exc:
+                logger.error(f"Background agent run failed: {exc}")
+                _agent_results[run_id] = {"status": "error", "error": str(exc)}
+
     background_tasks.add_task(run_in_background)
-    
+
     return AgentRunResponse(
         run_id=run_id,
         status="running",
@@ -214,13 +143,10 @@ async def trigger_agent_async(
 
 @router.get("/status/{run_id}", response_model=AgentResultResponse)
 async def get_agent_status(run_id: str) -> AgentResultResponse:
-    """
-    Get status of an agent run.
-    获取 Agent 运行状态
-    """
+    """轮询通过 `/trigger` 启动的异步 Agent 任务状态。"""
     if run_id not in _agent_results:
         return AgentResultResponse(run_id=run_id, status="not_found")
-    
+
     result = _agent_results[run_id]
     return AgentResultResponse(
         run_id=run_id,

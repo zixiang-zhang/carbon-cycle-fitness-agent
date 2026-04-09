@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { authApi } from "@/lib/api";
+import { userStorage } from "@/lib/storage";
 
 export default function RegisterPage() {
     const [email, setEmail] = useState("");
@@ -46,15 +47,12 @@ export default function RegisterPage() {
             // Log them in immediately
             const loginResponse = await authApi.login({ email, password });
 
-            localStorage.setItem("auth_token", loginResponse.access_token);
-            localStorage.setItem("user_id", user.id);
-            localStorage.setItem("user_name", user.name);
-            localStorage.setItem("user", JSON.stringify({
+            userStorage.set({
                 id: user.id,
                 name: user.name,
                 email: user.email,
                 token: loginResponse.access_token
-            }));
+            });
 
             // Redirect to onboarding to complete profile
             window.location.href = "/onboarding";

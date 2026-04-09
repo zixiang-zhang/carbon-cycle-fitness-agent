@@ -172,6 +172,9 @@ class UserUpdate(BaseModel):
     """Schema for updating user profile."""
     
     name: Optional[str] = Field(None, min_length=1, max_length=100)
+    gender: Optional[Gender] = None
+    birth_date: Optional[date] = None
+    height_cm: Optional[float] = Field(None, gt=100, lt=250)
     weight_kg: Optional[float] = Field(None, gt=30, lt=300)
     target_weight_kg: Optional[float] = Field(None, gt=30, lt=300)
     goal: Optional[UserGoal] = None

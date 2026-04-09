@@ -62,6 +62,15 @@ class PlanEnrichmentService:
         logger.info(f"Successfully enriched {enriched_count}/{len(plan.days)} days")
         return plan
 
+    async def enrich_day(self, day: DayPlan, user: UserProfile) -> DayPlan:
+        """
+        Public wrapper used by APIs that only need to regenerate one day.
+
+        Keeping a dedicated method avoids calling a private helper from the
+        route layer and makes the intent clearer when reading `api/plan.py`.
+        """
+        return await self._enrich_day(day, user)
+
     async def _enrich_day(self, day: DayPlan, user: UserProfile) -> DayPlan:
         """Generate content for a single day."""
         

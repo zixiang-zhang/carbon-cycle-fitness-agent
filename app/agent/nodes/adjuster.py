@@ -10,10 +10,12 @@ Enhanced with RAG knowledge retrieval and LLM-powered suggestions.
 """
 
 from typing import Any
+from uuid import UUID
 
 from app.agent.state import AgentState, AdjustmentResult
 from app.core.logging import get_logger, log_agent_decision
 from app.llm.client import get_llm_client
+from app.memory.agent_memory import get_agent_memory
 from app.rag.retriever import retrieve_context
 
 logger = get_logger(__name__)
@@ -220,16 +222,30 @@ async def adjust_node(state: AgentState) -> dict[str, Any]:
     }
     motivation = motivations.get(severity, "加油！")
     
+    decision = f"adjust_{adj_type}"
+    reasoning = f"建议调整热量{cal_adj:.0f}千卡，生成{len(behavioral_suggestions)}条建议"
     log_agent_decision(
         logger,
         node="adjuster",
-        decision=f"adjust_{adj_type}",
-        reasoning=f"建议调整热量{cal_adj:.0f}千卡，生成{len(behavioral_suggestions)}条建议",
+        decision=decision,
+        reasoning=reasoning,
         context={
             "actions_count": len(actions),
             "smart_suggestions_count": len(smart_suggestions),
         },
     )
+    try:
+        await get_agent_memory().record_decision(
+            run_id=UUID(state["run_id"]),
+            node="adjuster",
+            decision=decision,
+            reasoning=reasoning,
+            input_summary=f"severity={severity}, patterns={len(patterns)}",
+            output_summary=str(adjustment.model_dump(mode='json'))[:500],
+            confidence=0.84,
+        )
+    except Exception as exc:
+        logger.warning(f"Failed to persist adjuster decision: {exc}")
     
     return {
         "adjustment": adjustment,

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { planApi, userApi } from "@/lib/api";
+import { logApi, planApi, userApi } from "@/lib/api";
 import { userStorage } from "@/lib/storage";
 import { CarbonCyclePlan, DayPlan, DayType } from "@/lib/types";
 import DayDetailModal from "@/components/DayDetailModal";
@@ -78,6 +78,21 @@ interface FoodLogEntry {
   image_path?: string;
 }
 
+function flattenFoodLog(dayLog: any): FoodLogEntry[] {
+  return (dayLog?.meals || []).flatMap((meal: any) =>
+    (meal.items || []).map((item: any, index: number) => ({
+      id: `${meal.meal_type}-${index}-${item.name}`,
+      food_name: item.name,
+      portion: `${item.quantity}${item.unit}`,
+      carbs_g: item.carbs_g,
+      protein_g: item.protein_g,
+      fat_g: item.fat_g,
+      calories: item.calories,
+      time: meal.time?.slice(0, 5) || "--:--",
+    })),
+  );
+}
+
 export default function DashboardPage() {
   const router = useRouter();
   const [user, setUser] = useState<{ name: string } | null>(null);
@@ -100,6 +115,8 @@ export default function DashboardPage() {
   };
 
   useEffect(() => {
+    // Dashboard depends on the persisted onboarding user id. If it is missing
+    // we redirect back to onboarding instead of rendering half-initialized UI.
     const userId = userStorage.getUserId();
     if (!userId) {
       router.push("/onboarding");
@@ -110,17 +127,29 @@ export default function DashboardPage() {
 
   const loadData = async (userId: string) => {
     try {
-      const [userData, activePlan] = await Promise.all([
+      const todayStr = new Date().toISOString().split("T")[0];
+      // Fetch the profile, active plan, and today's log together so the
+      // landing dashboard can render "plan vs actual" in one shot.
+      const [userData, activePlan, todayLog] = await Promise.all([
         userApi.get(userId),
         planApi.getActive(userId).catch(() => null),
+        logApi.getByDate(userId, todayStr).catch(() => null),
       ]);
       setUser(userData);
       setPlan(activePlan);
 
-      const todayStr = new Date().toISOString().split("T")[0];
       if (activePlan) {
         const tp = activePlan.days.find((d: DayPlan) => d.date === todayStr);
         setTodayPlan(tp || activePlan.days[0]);
+      }
+
+      if (todayLog) {
+        const entries = flattenFoodLog(todayLog);
+        setFoodLogs(entries);
+        setConsumedCalories(entries.reduce((sum, entry) => sum + entry.calories, 0));
+      } else {
+        setFoodLogs([]);
+        setConsumedCalories(0);
       }
     } catch (err) {
       console.error(err);
@@ -157,6 +186,7 @@ export default function DashboardPage() {
           className="col-span-3 row-span-4 flex flex-col justify-between overflow-hidden relative group cursor-pointer hover:border-primary/50 transition-all"
           onClick={() => todayPlan && setSelectedDay(todayPlan)}
         >
+          {/* Today's plan card shows the AI-generated text for the selected day. */}
           <div className="absolute top-4 right-4 p-2 opacity-30 group-hover:opacity-100 transition-opacity">
             <span className="text-3xl">📝</span>
           </div>
@@ -360,21 +390,36 @@ export default function DashboardPage() {
         isOpen={showFoodModal}
         onClose={() => setShowFoodModal(false)}
         userId={userStorage.getUserId() || ""}
-        onSuccess={(result) => {
-          // Add to food logs
-          const newLog = {
-            id: Date.now().toString(),
-            food_name: result.food_name,
-            portion: result.portion,
-            carbs_g: result.carbs_g,
-            protein_g: result.protein_g,
-            fat_g: result.fat_g,
-            calories: result.calories,
-            time: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
-            image_path: result.image_path,
-          };
-          setFoodLogs(prev => [...prev, newLog]);
-          setConsumedCalories(prev => prev + result.calories);
+        onSuccess={async (result) => {
+          // Prefer refetching the persisted log so UI stays consistent with the
+          // backend after image recognition / manual entry.
+          const userId = userStorage.getUserId();
+          if (!userId) {
+            return;
+          }
+
+          const todayStr = new Date().toISOString().split("T")[0];
+          const persistedLog = await logApi.getByDate(userId, todayStr).catch(() => null);
+
+          if (persistedLog) {
+            const entries = flattenFoodLog(persistedLog);
+            setFoodLogs(entries);
+            setConsumedCalories(entries.reduce((sum, entry) => sum + entry.calories, 0));
+          } else {
+            const newLog = {
+              id: result.log_id || Date.now().toString(),
+              food_name: result.food_name,
+              portion: result.portion,
+              carbs_g: result.carbs_g,
+              protein_g: result.protein_g,
+              fat_g: result.fat_g,
+              calories: result.calories,
+              time: new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }),
+              image_path: result.image_path || undefined,
+            };
+            setFoodLogs((prev) => [...prev, newLog]);
+            setConsumedCalories((prev) => prev + result.calories);
+          }
           setShowFoodModal(false);
         }}
       />

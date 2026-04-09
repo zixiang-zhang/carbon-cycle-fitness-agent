@@ -7,7 +7,6 @@ Uses vision model to analyze food images and estimate macros.
 """
 
 import json
-import os
 import uuid
 from datetime import date, datetime
 from pathlib import Path
@@ -21,6 +20,7 @@ from app.core.database import get_db
 from app.core.logging import get_logger
 from app.db.db_storage import DatabaseStorage
 from app.llm.client import get_llm_client
+from app.models.log import FoodItem
 
 logger = get_logger(__name__)
 
@@ -42,6 +42,43 @@ class FoodAnalysisResult(BaseModel):
     confidence: float
     image_path: Optional[str] = None
     log_id: Optional[str] = None
+
+
+async def _auto_log_food(
+    storage: DatabaseStorage,
+    *,
+    user_id: str,
+    meal_type: str,
+    food_name: str,
+    quantity: float,
+    unit: str,
+    calories: float,
+    protein_g: float,
+    carbs_g: float,
+    fat_g: float,
+) -> Optional[str]:
+    """Persist a detected food item into the user's daily log."""
+    if not await storage.get_user(user_id):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    active_plan = await storage.get_active_plan(user_id)
+    _, item_id = await storage.add_food_item_entry(
+        user_id=user_id,
+        plan_id=str(active_plan.id) if active_plan else None,
+        log_date=date.today(),
+        meal_type=meal_type,
+        food_item=FoodItem(
+            name=food_name,
+            quantity=quantity,
+            unit=unit,
+            calories=round(calories, 1),
+            protein_g=round(protein_g, 1),
+            carbs_g=round(carbs_g, 1),
+            fat_g=round(fat_g, 1),
+            fiber_g=0,
+        ),
+    )
+    return item_id
 
 
 @router.post("/analyze", response_model=FoodAnalysisResult)
@@ -152,12 +189,24 @@ async def analyze_food(
         logger.error(f"Vision analysis failed: {e}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
     
-    # For MVP, skip auto-logging to storage - just return the analysis result
-    # The frontend will handle the logging via the confirmation step
     log_id = None
     if auto_log:
-        logger.info(f"Food analysis complete for user {user_id}: {food_name} ({calories:.0f} kcal)")
-        # TODO: Implement proper diet log storage when DietLog model is fully integrated
+        storage = DatabaseStorage(db)
+        portion_value = float("".join(ch for ch in portion if (ch.isdigit() or ch == ".")) or 100)
+        portion_unit = "g" if "ml" not in portion.lower() else "ml"
+        log_id = await _auto_log_food(
+            storage,
+            user_id=user_id,
+            meal_type=meal_type,
+            food_name=food_name,
+            quantity=portion_value,
+            unit=portion_unit,
+            calories=calories,
+            protein_g=protein_g,
+            carbs_g=carbs_g,
+            fat_g=fat_g,
+        )
+        logger.info(f"Food analysis auto-logged for user {user_id}: {food_name} ({calories:.0f} kcal)")
     
     return FoodAnalysisResult(
         food_name=food_name,
@@ -179,6 +228,18 @@ class ManualFoodInput(BaseModel):
     user_id: str
     meal_type: str = "lunch"
     auto_log: bool = True
+
+
+class ManualFoodLogInput(BaseModel):
+    """Persist a manually entered food item without AI estimation."""
+
+    user_id: str
+    food_name: str
+    weight_g: float
+    meal_type: str = "lunch"
+    carbs_g: float
+    protein_g: float
+    fat_g: float
 
 
 @router.post("/estimate", response_model=FoodAnalysisResult)
@@ -245,11 +306,22 @@ async def estimate_food_nutrition(
     
     calories = carbs_g * 4 + protein_g * 4 + fat_g * 9
     
-    # Generate log ID if auto_log is enabled
     log_id = None
     if input_data.auto_log:
-        log_id = str(uuid.uuid4())
-        logger.info(f"Manual food entry logged: {input_data.food_name} ({input_data.weight_g}g) = {calories:.0f} kcal")
+        storage = DatabaseStorage(db)
+        log_id = await _auto_log_food(
+            storage,
+            user_id=input_data.user_id,
+            meal_type=input_data.meal_type,
+            food_name=input_data.food_name,
+            quantity=input_data.weight_g,
+            unit="g",
+            calories=calories,
+            protein_g=protein_g,
+            carbs_g=carbs_g,
+            fat_g=fat_g,
+        )
+        logger.info(f"Manual food entry auto-logged: {input_data.food_name} ({input_data.weight_g}g)")
     
     return FoodAnalysisResult(
         food_name=input_data.food_name,
@@ -259,6 +331,41 @@ async def estimate_food_nutrition(
         fat_g=round(fat_g, 1),
         calories=round(calories, 1),
         confidence=0.7,  # Lower confidence for text-based estimation
+        image_path=None,
+        log_id=log_id,
+    )
+
+
+@router.post("/manual", response_model=FoodAnalysisResult)
+async def create_manual_food_log(
+    input_data: ManualFoodLogInput,
+    db: AsyncSession = Depends(get_db),
+) -> FoodAnalysisResult:
+    """Persist a manually entered food item directly into the daily log."""
+    calories = input_data.carbs_g * 4 + input_data.protein_g * 4 + input_data.fat_g * 9
+
+    storage = DatabaseStorage(db)
+    log_id = await _auto_log_food(
+        storage,
+        user_id=input_data.user_id,
+        meal_type=input_data.meal_type,
+        food_name=input_data.food_name,
+        quantity=input_data.weight_g,
+        unit="g",
+        calories=calories,
+        protein_g=input_data.protein_g,
+        carbs_g=input_data.carbs_g,
+        fat_g=input_data.fat_g,
+    )
+
+    return FoodAnalysisResult(
+        food_name=input_data.food_name,
+        portion=f"{input_data.weight_g}g",
+        carbs_g=round(input_data.carbs_g, 1),
+        protein_g=round(input_data.protein_g, 1),
+        fat_g=round(input_data.fat_g, 1),
+        calories=round(calories, 1),
+        confidence=1.0,
         image_path=None,
         log_id=log_id,
     )
@@ -277,22 +384,29 @@ async def correct_food_analysis(
     Manually correct a food analysis result.
     手动修正食物分析结果。
     
-    For MVP, this endpoint just returns the corrected values.
-    TODO: Implement storage update when DietLog model is fully integrated.
+    The path parameter is the persisted food item id returned by /analyze or /estimate.
     """
     # Calculate new calories
     calories = carbs_g * 4 + protein_g * 4 + fat_g * 9
     
     logger.info(f"Food correction: log_id={log_id}, new_calories={calories:.0f}")
-    
-    # TODO: Update storage when DietLog storage is fully integrated
-    # storage = DatabaseStorage(db)
-    # updated = await storage.update_log(log_id, ...)
+
+    storage = DatabaseStorage(db)
+    updated = await storage.update_food_item(
+        log_id,
+        name=food_name,
+        carbs_g=carbs_g,
+        protein_g=protein_g,
+        fat_g=fat_g,
+        calories=calories,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Food entry not found")
     
     return {
         "status": "corrected",
         "log_id": log_id,
-        "food_name": food_name,
+        "food_name": updated["name"],
         "carbs_g": carbs_g,
         "protein_g": protein_g,
         "fat_g": fat_g,

@@ -6,9 +6,11 @@ Repository package initialization.
 from app.db.repositories.user_repo import UserRepository
 from app.db.repositories.plan_repo import PlanRepository
 from app.db.repositories.log_repo import LogRepository
+from app.db.repositories.report_repo import ReportRepository
 
 __all__ = [
     "UserRepository",
     "PlanRepository",
     "LogRepository",
+    "ReportRepository",
 ]

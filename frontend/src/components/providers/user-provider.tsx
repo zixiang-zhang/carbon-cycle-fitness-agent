@@ -27,7 +27,7 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
         } catch (err) {
             console.error("Failed to fetch user", err);
             // If error (e.g. user deleted), clear local storage
-            userStorage.clearUserId();
+            userStorage.clear();
             setUserId(null);
             setUser(null);
         } finally {
@@ -53,7 +53,7 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
     };
 
     const logout = () => {
-        userStorage.clearUserId();
+        userStorage.clear();
         setUserId(null);
         setUser(null);
     };

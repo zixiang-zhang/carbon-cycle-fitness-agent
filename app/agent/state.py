@@ -1,27 +1,33 @@
 """
-Agent state schema definition.
-智能体状态模式定义
+AgentState 及其子结构定义。
 
-Defines the state structure passed between agent nodes.
-定义在智能体节点之间传递的状态结构
+你可以把这个文件理解成：
+“LangGraph 在各个节点之间传递的那份共享状态，到底长什么样。”
 """
 
-from datetime import date
 from typing import Any, Optional, TypedDict
-from uuid import UUID
 
 
 class UserContext(TypedDict):
-    """User context within agent state."""
+    """Agent 节点共享的用户画像。"""
+
     user_id: str
     name: str
+    gender: str
+    age: int
+    height_cm: float
     goal: str
     weight_kg: float
+    target_weight_kg: float | None
+    activity_level: str
+    training_days: int
+    dietary_preferences: str
     tdee: float
 
 
 class PlanContext(TypedDict):
-    """Plan context within agent state."""
+    """Agent 节点共享的当前计划快照。"""
+
     plan_id: str
     start_date: str
     current_day: int
@@ -30,21 +36,31 @@ class PlanContext(TypedDict):
     target_protein: float
     target_carbs: float
     target_fat: float
+    cycle_length: int
+    num_cycles: int
+    base_calories: float
+    day_count: int
 
 
 class LogContext(TypedDict):
-    """Log context within agent state."""
+    """Agent 节点读取的执行日志摘要。"""
+
     date: str
     actual_calories: float
     actual_protein: float
     actual_carbs: float
     actual_fat: float
+    target_calories: float
+    target_protein: float
+    target_carbs: float
+    target_fat: float
     training_completed: bool
     meal_count: int
 
 
 class ReflectionResult(TypedDict):
-    """Result from reflection node."""
+    """Reflector 节点输出的偏差分析结果。"""
+
     severity: str
     deviation_type: str
     calorie_deviation_pct: float
@@ -54,7 +70,8 @@ class ReflectionResult(TypedDict):
 
 
 class AdjustmentResult(TypedDict):
-    """Result from adjustment node."""
+    """Adjuster 节点输出的调整建议。"""
+
     adjustment_type: str
     calorie_adjustment: float
     immediate_actions: list[dict]
@@ -63,51 +80,40 @@ class AdjustmentResult(TypedDict):
 
 class AgentState(TypedDict, total=False):
     """
-    Complete agent state passed between nodes.
-    
-    Attributes:
-        run_id: Unique identifier for this agent run.
-        trigger: What triggered this agent run.
-        user: User context information.
-        plan: Current plan context.
-        logs: Recent diet logs.
-        current_date: Date being processed.
-        planner_output: Output from planner node.
-        actor_output: Output from actor node.
-        reflection: Reflection analysis result.
-        adjustment: Adjustment recommendations.
-        final_output: Final agent output.
-        error: Error message if failed.
-        should_adjust: Whether adjustment is needed.
-        iteration: Current iteration count.
-        max_iterations: Maximum allowed iterations.
+    LangGraph 在节点之间流转的完整共享状态。
+
+    可以把它按 4 个区块理解：
+    1. 运行元信息：run_id / trigger
+    2. 业务上下文：user / plan / logs
+    3. 节点产出：planner_output / actor_output / reflection / adjustment
+    4. 控制字段：error / should_adjust / iteration / messages
     """
-    
-    # Run metadata
+
+    # 运行元信息：标识这次 Agent 运行是谁触发的、为什么触发。
     run_id: str
     trigger: str
-    
-    # Context
+
+    # 业务上下文：这是 Planner / Actor / Reflector / Adjuster 的共同输入。
     user: UserContext
     plan: PlanContext
     logs: list[LogContext]
     current_date: str
-    
-    # Node outputs
+
+    # 节点产出：每个节点把自己的结果写回状态，后续节点继续读取。
     planner_output: Optional[dict[str, Any]]
     actor_output: Optional[dict[str, Any]]
     reflection: Optional[ReflectionResult]
     adjustment: Optional[AdjustmentResult]
-    
-    # Control flow
+
+    # 控制流字段：用于路由、异常控制和最终输出。
     final_output: Optional[dict[str, Any]]
     error: Optional[str]
     should_adjust: bool
     iteration: int
     max_iterations: int
-    
-    # Messages for LLM context
+
+    # 有些节点会走对话式 LLM 调用，因此把消息历史也放进共享状态。
     messages: list[dict[str, str]]
-    
-    # Database session for tool execution
+
+    # 如果某个节点需要执行工具调用，可以把数据库会话塞进状态里使用。
     db_session: Optional[Any]

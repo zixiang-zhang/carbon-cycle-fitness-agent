@@ -10,10 +10,12 @@ Enhanced with multi-day trend analysis and LLM insights.
 """
 
 from typing import Any, Optional
+from uuid import UUID
 
 from app.agent.state import AgentState, ReflectionResult
 from app.core.logging import get_logger, log_agent_decision
 from app.llm.client import get_llm_client
+from app.memory.agent_memory import get_agent_memory
 
 logger = get_logger(__name__)
 
@@ -255,13 +257,27 @@ async def reflect_node(state: AgentState) -> dict[str, Any]:
     plan_dict = dict(plan) if plan else {}
     summary = await _generate_reflection_summary(reflection, trends, plan_dict)
     
+    decision = f"severity_{severity}"
+    reasoning = f"热量偏差{cal_dev:.1f}%，趋势: {trends.get('trend_direction', '未知') if trends else '未知'}"
     log_agent_decision(
         logger,
         node="reflector",
-        decision=f"severity_{severity}",
-        reasoning=f"热量偏差{cal_dev:.1f}%，趋势: {trends.get('trend_direction', '未知') if trends else '未知'}",
+        decision=decision,
+        reasoning=reasoning,
         context={"patterns": patterns, "trends": trends},
     )
+    try:
+        await get_agent_memory().record_decision(
+            run_id=UUID(state["run_id"]),
+            node="reflector",
+            decision=decision,
+            reasoning=reasoning,
+            input_summary=f"log_count={len(logs)}, target_day_type={plan.get('day_type', 'unknown')}",
+            output_summary=summary[:500],
+            confidence=0.82,
+        )
+    except Exception as exc:
+        logger.warning(f"Failed to persist reflector decision: {exc}")
     
     return {
         "reflection": reflection,

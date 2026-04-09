@@ -64,6 +64,7 @@ class DailyAnalysis:
     """Analysis result for a single day."""
     
     date: date
+    training_planned: bool
     calories: MacroDeviation
     protein: MacroDeviation
     carbs: MacroDeviation
@@ -95,6 +96,7 @@ class DailyAnalysis:
                     "percentage": round(self.fat.percentage_diff, 1),
                 },
             },
+            "training_planned": self.training_planned,
             "training_skipped": self.training_deviation,
             "severity": self.severity.value,
             "primary_deviation_type": self.primary_deviation_type.value,
@@ -269,6 +271,7 @@ class ExecutionAnalysisService:
         
         analysis = DailyAnalysis(
             date=log.date,
+            training_planned=plan.training_scheduled,
             calories=calories_dev,
             protein=protein_dev,
             carbs=carbs_dev,

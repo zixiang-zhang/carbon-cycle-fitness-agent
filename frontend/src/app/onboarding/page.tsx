@@ -44,40 +44,24 @@ export default function OnboardingPage() {
         setLoadingText("正在创建你的数字档案...");
         try {
             const birthDate = `${form.birthYear}-01-01`;
-            const userId = localStorage.getItem("user_id");
-            const userStr = localStorage.getItem("user");
-            const savedUser = userStr ? JSON.parse(userStr) : null;
+            const userId = userStorage.getUserId();
 
-            let user;
-            if (userId) {
-                // Update existing user created during registration
-                user = await userApi.update(userId, {
-                    name: form.name,
-                    gender: form.gender,
-                    birth_date: birthDate,
-                    height_cm: form.height,
-                    weight_kg: form.weight,
-                    target_weight_kg: form.targetWeight,
-                    goal: form.goal,
-                    activity_level: "moderate",
-                    training_days_per_week: form.trainingDays,
-                });
-            } else {
-                // Fallback for anonymous users (though login is now prioritized)
-                user = await userApi.create({
-                    name: form.name,
-                    gender: form.gender,
-                    birth_date: birthDate,
-                    height_cm: form.height,
-                    weight_kg: form.weight,
-                    target_weight_kg: form.targetWeight,
-                    goal: form.goal,
-                    activity_level: "moderate",
-                    training_days_per_week: form.trainingDays,
-                });
-                localStorage.setItem("user_id", user.id);
-                localStorage.setItem("user", JSON.stringify(user));
+            if (!userId) {
+                router.push("/login");
+                return;
             }
+
+            const user = await userApi.update(userId, {
+                name: form.name,
+                gender: form.gender,
+                birth_date: birthDate,
+                height_cm: form.height,
+                weight_kg: form.weight,
+                target_weight_kg: form.targetWeight,
+                goal: form.goal,
+                activity_level: "moderate",
+                training_days_per_week: form.trainingDays,
+            });
 
             setLoadingText("AI 正在计算基础代谢...");
             await new Promise(r => setTimeout(r, 800));
@@ -111,9 +95,9 @@ export default function OnboardingPage() {
                 id: user.id,
                 name: user.name,
                 email: user.email || '',
+                token: userStorage.getToken() || undefined,
             };
-            localStorage.setItem("user", JSON.stringify(updatedUser));
-            localStorage.setItem("user_id", String(user.id));
+            userStorage.set(updatedUser);
             
             router.push("/");
         } catch (err: any) {

@@ -15,10 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.repositories.user_repo import UserRepository
 from app.db.repositories.plan_repo import PlanRepository
 from app.db.repositories.log_repo import LogRepository
+from app.db.repositories.report_repo import ReportRepository
 from app.db.repositories.weight_repo import WeightRepository
 from app.models.user import UserProfile
 from app.models.plan import CarbonCyclePlan
 from app.models.log import DietLog, WeightLog
+from app.models.report import WeeklyReport
 
 
 class DatabaseStorage:
@@ -35,6 +37,7 @@ class DatabaseStorage:
         self._user_repo = UserRepository(session)
         self._plan_repo = PlanRepository(session)
         self._log_repo = LogRepository(session)
+        self._report_repo = ReportRepository(session)
         self._weight_repo = WeightRepository(session)
     
     # ============ User Operations ============
@@ -117,7 +120,32 @@ class DatabaseStorage:
     async def get_user_log_stats(self, user_id: Union[UUID, str], days: int = 7) -> dict:
         """Get log statistics for a user."""
         return await self._log_repo.get_stats(user_id, days=days)
-    
+
+    async def add_food_item_entry(
+        self,
+        user_id: Union[UUID, str],
+        log_date: date,
+        meal_type: str,
+        food_item,
+        plan_id: Optional[Union[UUID, str]] = None,
+    ) -> tuple[DietLog, str]:
+        """Append a food item to a log and return the updated log and item id."""
+        return await self._log_repo.add_food_item_entry(
+            user_id=user_id,
+            plan_id=plan_id,
+            log_date=log_date,
+            meal_type=meal_type,
+            food_item=food_item,
+        )
+
+    async def update_food_item(
+        self,
+        item_id: Union[UUID, str],
+        **updates,
+    ) -> Optional[dict]:
+        """Update a stored food item."""
+        return await self._log_repo.update_food_item(item_id, **updates)
+
     # ============ Weight Log Operations ============
     
     async def add_weight_log(self, weight_log: WeightLog) -> WeightLog:
@@ -147,4 +175,22 @@ class DatabaseStorage:
     async def delete_weight_log(self, log_id: Union[UUID, str]) -> bool:
         """Delete a weight log."""
         return await self._weight_repo.delete(log_id)
+
+    # ============ Weekly Report Operations ============
+
+    async def add_weekly_report(self, report: WeeklyReport) -> WeeklyReport:
+        """Persist a weekly report."""
+        return await self._report_repo.create(report)
+
+    async def upsert_weekly_report(self, report: WeeklyReport) -> WeeklyReport:
+        """Persist a weekly report for the same week."""
+        return await self._report_repo.upsert(report)
+
+    async def get_weekly_report(self, report_id: Union[UUID, str]) -> Optional[WeeklyReport]:
+        """Get a weekly report by id."""
+        return await self._report_repo.get_by_id(report_id)
+
+    async def get_user_weekly_reports(self, user_id: Union[UUID, str]) -> list[WeeklyReport]:
+        """List a user's weekly reports."""
+        return await self._report_repo.get_user_reports(user_id)
 

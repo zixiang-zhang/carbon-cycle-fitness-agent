@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
 
 from app.core.logging import get_logger
-from app.memory.user_memory import InMemoryStore, MemoryStore
+from app.memory.user_memory import FileMemoryStore, MemoryStore
 
 logger = get_logger(__name__)
 
@@ -114,7 +114,12 @@ class AgentMemory:
         """Generate storage key for user's run history."""
         return f"agent:user:{user_id}:runs"
     
-    async def start_run(self, user_id: UUID, trigger: str) -> AgentRun:
+    async def start_run(
+        self,
+        user_id: UUID,
+        trigger: str,
+        run_id: Optional[UUID] = None,
+    ) -> AgentRun:
         """
         Start a new agent run.
         
@@ -125,7 +130,7 @@ class AgentMemory:
         Returns:
             AgentRun: The new run record.
         """
-        run = AgentRun(user_id=user_id, trigger=trigger)
+        run = AgentRun(id=run_id or uuid4(), user_id=user_id, trigger=trigger)
         self._current_runs[run.id] = run
         
         logger.info(f"Started agent run {run.id} for user {user_id}")
@@ -301,6 +306,6 @@ def get_agent_memory() -> AgentMemory:
     """
     global _agent_memory
     if _agent_memory is None:
-        store = InMemoryStore()
+        store = FileMemoryStore()
         _agent_memory = AgentMemory(store)
     return _agent_memory

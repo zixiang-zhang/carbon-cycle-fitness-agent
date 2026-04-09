@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback } from "react";
+import { apiBaseUrl } from "@/lib/api";
 
 interface FoodAnalysisResult {
     food_name: string;
@@ -77,7 +78,7 @@ export default function FoodUploadModal({
             formData.append("meal_type", getMealType());
             formData.append("auto_log", "true");
 
-            const res = await fetch("http://localhost:8000/api/food/analyze", {
+            const res = await fetch(`${apiBaseUrl}/api/food/analyze`, {
                 method: "POST",
                 body: formData,
             });
@@ -113,7 +114,7 @@ export default function FoodUploadModal({
         try {
             if (useAIEstimate) {
                 // Call AI estimation API
-                const res = await fetch("http://localhost:8000/api/food/estimate", {
+                const res = await fetch(`${apiBaseUrl}/api/food/estimate`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
@@ -164,7 +165,7 @@ export default function FoodUploadModal({
         const hour = new Date().getHours();
         if (hour < 10) return "breakfast";
         if (hour < 14) return "lunch";
-        if (hour < 18) return "snack";
+        if (hour < 18) return "afternoon_snack";
         return "dinner";
     };
 
@@ -177,7 +178,7 @@ export default function FoodUploadModal({
             formData.append("protein_g", String(editProtein));
             formData.append("fat_g", String(editFat));
 
-            const res = await fetch(`http://localhost:8000/api/food/correct/${result.log_id}`, {
+            const res = await fetch(`${apiBaseUrl}/api/food/correct/${result.log_id}`, {
                 method: "POST",
                 body: formData,
             });
@@ -201,9 +202,43 @@ export default function FoodUploadModal({
         }
     };
 
-    const handleConfirm = () => {
-        if (result && onSuccess) {
-            onSuccess(result);
+    const handleConfirm = async () => {
+        if (!result) return;
+
+        let finalResult = result;
+
+        if (!result.log_id) {
+            try {
+                const res = await fetch(`${apiBaseUrl}/api/food/manual`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        user_id: userId,
+                        food_name: result.food_name,
+                        weight_g: manualWeight,
+                        meal_type: getMealType(),
+                        carbs_g: editMode ? editCarbs : result.carbs_g,
+                        protein_g: editMode ? editProtein : result.protein_g,
+                        fat_g: editMode ? editFat : result.fat_g,
+                    }),
+                });
+
+                if (!res.ok) {
+                    const errData = await res.json().catch(() => ({ detail: "保存失败" }));
+                    throw new Error(errData.detail || "保存失败");
+                }
+
+                finalResult = await res.json();
+                setResult(finalResult);
+            } catch (err) {
+                console.error(err);
+                alert(err instanceof Error ? err.message : "保存失败，请重试");
+                return;
+            }
+        }
+
+        if (onSuccess) {
+            onSuccess(finalResult);
         }
         handleClose();
     };

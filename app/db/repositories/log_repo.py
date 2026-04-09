@@ -6,7 +6,7 @@ Handles database operations for diet logs.
 处理饮食日志的数据库操作
 """
 
-from datetime import date, time
+from datetime import date, datetime, time
 from typing import Optional, Union
 from uuid import UUID
 
@@ -121,6 +121,84 @@ class LogRepository:
         
         await self.session.flush()
         return await self.get_by_id(log_id)
+
+    async def add_food_item_entry(
+        self,
+        user_id: Union[UUID, str],
+        log_date: date,
+        meal_type: str,
+        food_item: FoodItem,
+        plan_id: Optional[Union[UUID, str]] = None,
+    ) -> tuple[DietLog, str]:
+        """Append a food item to a user's daily log."""
+        result = await self.session.execute(
+            select(LogModel)
+            .options(selectinload(LogModel.meals).selectinload(MealModel.items))
+            .where(LogModel.user_id == str(user_id), LogModel.date == log_date)
+        )
+        db_log = result.scalar_one_or_none()
+
+        if not db_log:
+            db_log = LogModel(
+                user_id=str(user_id),
+                plan_id=str(plan_id) if plan_id else None,
+                date=log_date,
+            )
+            self.session.add(db_log)
+            await self.session.flush()
+
+        db_meal = MealModel(
+            log_id=db_log.id,
+            meal_type=meal_type,
+            time=datetime.now().time().replace(microsecond=0),
+        )
+        self.session.add(db_meal)
+        await self.session.flush()
+
+        db_item = FoodItemModel(
+            meal_id=db_meal.id,
+            name=food_item.name,
+            quantity=food_item.quantity,
+            unit=food_item.unit,
+            calories=food_item.calories,
+            protein_g=food_item.protein_g,
+            carbs_g=food_item.carbs_g,
+            fat_g=food_item.fat_g,
+            fiber_g=food_item.fiber_g,
+        )
+        self.session.add(db_item)
+        await self.session.flush()
+
+        updated_log = await self.get_by_id(db_log.id)
+        if updated_log is None:
+            raise ValueError("Failed to fetch updated log after adding food item")
+        return updated_log, str(db_item.id)
+
+    async def update_food_item(self, item_id: Union[UUID, str], **updates) -> Optional[dict]:
+        """Update a persisted food item."""
+        result = await self.session.execute(
+            select(FoodItemModel).where(FoodItemModel.id == str(item_id))
+        )
+        db_item = result.scalar_one_or_none()
+        if not db_item:
+            return None
+
+        for field, value in updates.items():
+            if hasattr(db_item, field) and value is not None:
+                setattr(db_item, field, value)
+
+        await self.session.flush()
+        return {
+            "id": str(db_item.id),
+            "name": db_item.name,
+            "quantity": db_item.quantity,
+            "unit": db_item.unit,
+            "calories": db_item.calories,
+            "protein_g": db_item.protein_g,
+            "carbs_g": db_item.carbs_g,
+            "fat_g": db_item.fat_g,
+            "fiber_g": db_item.fiber_g,
+        }
     
     async def delete(self, log_id: Union[UUID, str]) -> bool:
         """Delete a log."""

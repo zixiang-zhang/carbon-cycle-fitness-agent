@@ -1,30 +1,28 @@
-"""
-Weekly Report API.
-周报告 API
+"""周报相关接口：生成周报、查询周报历史、读取体重趋势。"""
 
-Generates weekly statistics and AI-powered analysis reports using Agent and Memory.
-使用 Agent 和 Memory 生成周统计数据和 AI 分析报告。
-"""
+from datetime import date, timedelta
+from typing import Any, Optional
 
-from datetime import date
-from typing import Optional, Any
-
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent import run_agent
+from app.agent.context import build_logs_context, build_plan_targets, build_user_context
 from app.core.database import get_db
 from app.core.logging import get_logger
-from app.agent import run_agent
 from app.db.db_storage import DatabaseStorage
+from app.models.report import DailyStats, WeeklyReport
+from app.services.execution_analysis import ExecutionAnalysisService
+from app.services.report_service import ReportService
 
 logger = get_logger(__name__)
-
 router = APIRouter()
 
 
 class WeeklyStats(BaseModel):
-    """Weekly statistics for report generation."""
+    """前端传入的周统计快照。"""
+
     calorieTarget: float
     calorieActual: float
     calorieRate: float
@@ -40,212 +38,27 @@ class WeeklyStats(BaseModel):
 
 
 class WeeklyReportRequest(BaseModel):
-    """Request body for weekly report generation."""
+    """生成周报时的请求体。"""
+
     user_id: str
-    stats: WeeklyStats
+    stats: Optional[WeeklyStats] = None
     plan_id: Optional[str] = None
+    week_start: Optional[date] = None
 
 
 class WeeklyReportResponse(BaseModel):
-    """Response model for weekly report."""
+    """生成周报后的响应结构。"""
+
+    report_id: str
     report: str
     generated_at: str
     agent_used: bool = False
     latency_ms: Optional[int] = None
 
 
-def _build_user_context(user: Any) -> dict[str, Any]:
-    """Build user context from UserProfile."""
-    return {
-        "user_id": str(user.id),
-        "name": user.name,
-        "gender": user.gender.value if hasattr(user.gender, 'value') else user.gender,
-        "age": user.calculate_age() if hasattr(user, 'calculate_age') else 30,
-        "height_cm": user.height_cm,
-        "weight_kg": user.weight_kg,
-        "target_weight_kg": getattr(user, 'target_weight_kg', user.weight_kg - 5) or user.weight_kg - 5,
-        "goal": user.goal.value if hasattr(user.goal, 'value') else user.goal,
-        "activity_level": user.activity_level.value if hasattr(user.activity_level, 'value') else user.activity_level,
-    }
-
-
-@router.post("/weekly", response_model=WeeklyReportResponse)
-async def generate_weekly_report(
-    request: WeeklyReportRequest,
-    db: AsyncSession = Depends(get_db),
-) -> WeeklyReportResponse:
-    """
-    Generate AI-powered weekly report with analysis and suggestions using Agent.
-    使用 Agent 生成周报告，包含分析和建议。
-    """
-    stats = request.stats
-    storage = DatabaseStorage(db)
-    
-    # Get user data
-    try:
-        user = await storage.get_user(request.user_id)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        user_context = _build_user_context(user)
-    except Exception as e:
-        logger.warning(f"Failed to get user context: {e}")
-        user_context = {"user_id": request.user_id}
-    
-    # Get active plan for context
-    try:
-        plan = await storage.get_active_plan(request.user_id)
-    except Exception:
-        plan = None
-    
-    # Build trigger message with weekly stats
-    trigger_message = f"""
-周复盘分析请求：
-- 热量达标率: {stats.calorieRate:.0f}%
-- 目标热量: {stats.calorieTarget:.0f} kcal/天
-- 实际热量: {stats.calorieActual:.0f} kcal/天
-- 训练完成: {stats.trainingCompleted}/{stats.trainingTotal} 次 ({stats.trainingRate:.0f}%)
-- 日均碳水: {stats.avgCarbs:.0f}g
-- 日均蛋白: {stats.avgProtein:.0f}g
-- 日均脂肪: {stats.avgFat:.0f}g
-{f"- 体重变化: {stats.weightChange:+.1f}kg" if stats.weightChange is not None else ""}
-
-请分析本周执行情况并给出改进建议。
-"""
-    
-    # Get recent logs for memory
-    try:
-        db_logs = await storage.get_user_logs(request.user_id, limit=7)
-        logs_context = [
-            {
-                "date": log.date.isoformat(),
-                "actual_calories": log.total_calories,
-                "actual_protein": log.total_protein,
-                "actual_carbs": log.total_carbs,
-                "actual_fat": log.total_fat,
-                "training_completed": log.training_completed,
-                "meal_count": len(log.meals)
-            }
-            for log in db_logs
-        ]
-    except Exception as e:
-        logger.warning(f"Failed to fetch logs for user {request.user_id}: {e}")
-        logs_context = []
-
-    try:
-        # Call the Agent with memory integration
-        result = await run_agent(
-            user_id=request.user_id,
-            trigger=f"weekly_report: {trigger_message}",
-            user_context=user_context,
-            plan_context={
-                "plan_id": str(plan.id) if plan else None,
-                "target_calories": stats.calorieTarget,
-                "target_protein": stats.avgProtein,
-                "target_carbs": stats.avgCarbs,
-                "target_fat": stats.avgFat
-            },
-            logs=logs_context,
-        )
-        
-        # Extract report from agent result
-        if result.get("status") == "success":
-            # Capture latency from agent
-            latency_ms = result.get("latency_ms")
-            
-            # Try to get structured output
-            reflection = result.get("reflection", {})
-            adjustment = result.get("adjustment", {})
-            reflection_summary = result.get("reflection_summary")
-            trends = result.get("trends", {})
-            
-            # Final output might contain the summary
-            final_output = result.get("planner_output", {}) # In some versions it's in planner_output
-            motivation = final_output.get("motivation", "") if isinstance(final_output, dict) else ""
-            
-            # Build comprehensive report
-            report_parts = ["## AI 深度复盘分析\n"]
-            
-            # Reflection summary
-            if reflection_summary:
-                report_parts.append(f"### 📊 执行情况反馈\n{reflection_summary}\n")
-            elif reflection:
-                summary = reflection.get("summary", "")
-                adherence = reflection.get("adherence_score", stats.calorieRate)
-                report_parts.append(f"### 📊 执行对比分析\n{summary}\n")
-                if adherence:
-                    report_parts.append(f"- 综合评分: **{adherence}**\n")
-            else:
-                report_parts.append(f"### 📊 本周执行回顾\n")
-                report_parts.append(f"- 热量达成率: {stats.calorieRate:.0f}%\n")
-                report_parts.append(f"- 训练完成率: {stats.trainingRate:.0f}%\n")
-            
-            # Trends analysis
-            if trends and trends.get("has_trend"):
-                report_parts.append("\n### 📈 趋势分析\n")
-                report_parts.append(f"- 执行趋势: **{trends.get('trend_direction', '稳定')}**\n")
-                report_parts.append(f"- 近7日平均热量偏差: {trends.get('avg_calorie_deviation', 0):.1f}%\n")
-                report_parts.append(f"- 近7日训练完成率: {trends.get('training_completion_rate', 0):.1f}%\n")
-            
-            # Adjustment suggestions
-            if adjustment:
-                suggestions = adjustment.get("suggestions", []) or adjustment.get("adjustments", [])
-                if suggestions:
-                    report_parts.append("\n### 💡 针对性改进建议\n")
-                    for i, adj in enumerate(suggestions[:3], 1):
-                        report_parts.append(f"{i}. {adj}\n")
-            
-            # Motivation
-            if motivation:
-                report_parts.append(f"\n### 🎯 Coach 寄语\n{motivation}\n")
-            
-            report = "".join(report_parts)
-            agent_used = True
-            
-        else:
-            # Agent failed or returned error, use fallback
-            latency_ms = result.get("latency_ms")
-            error_msg = result.get("error", "Unknown agent error")
-            logger.error(f"Agent returned error: {error_msg}")
-            raise Exception(error_msg)
-            
-    except Exception as e:
-        logger.error(f"Agent failed, using fallback: {e}")
-        latency_ms = None  # No latency for fallback
-        
-        # Fallback report without agent
-        report = f"""
-## 本周复盘
-
-### 📊 执行情况
-- 热量控制：达成率 **{stats.calorieRate:.0f}%**
-- 训练完成：{stats.trainingCompleted}/{stats.trainingTotal} 次 ({stats.trainingRate:.0f}%)
-{f"- 体重变化：{stats.weightChange:+.1f}kg" if stats.weightChange is not None else ""}
-
-### 💡 改进建议
-1. {"热量控制良好，继续保持！" if stats.calorieRate >= 80 else "热量摄入需要更精确记录"}
-2. {"训练全勤，非常棒！" if stats.trainingRate >= 100 else "部分训练未完成，建议调整时间安排"}
-3. 确保蛋白质摄入达到每日 {stats.avgProtein:.0f}g 目标
-
-### 🎯 下周目标
-- 保持碳水循环节奏
-- 每餐坚持拍照记录
-        """.strip()
-        agent_used = False
-    
-    return WeeklyReportResponse(
-        report=report,
-        generated_at=date.today().isoformat(),
-        agent_used=agent_used,
-        latency_ms=latency_ms,
-    )
-
-
-
-# ============ Historical Report Endpoints ============
-
 class ReportSummaryResponse(BaseModel):
-    """Summary of a historical report for list view."""
+    """周报列表页使用的摘要结构。"""
+
     id: str
     week_start: str
     week_end: str
@@ -256,7 +69,8 @@ class ReportSummaryResponse(BaseModel):
 
 
 class ReportDetailResponse(BaseModel):
-    """Full historical report detail."""
+    """周报详情页使用的详细结构。"""
+
     id: str
     user_id: str
     week_start: str
@@ -272,33 +86,264 @@ class ReportDetailResponse(BaseModel):
     created_at: str
 
 
-# In-memory storage for generated reports (would be DB in production)
-_report_cache: dict[str, dict] = {}
+def _week_bounds(anchor: Optional[date] = None) -> tuple[date, date]:
+    """根据任意一天，计算它所在周的周一和周日。"""
+    anchor = anchor or date.today()
+    week_start = anchor - timedelta(days=anchor.weekday())
+    return week_start, week_start + timedelta(days=6)
 
 
-@router.get("/{report_id}", response_model=ReportDetailResponse)
-async def get_report_by_id(
-    report_id: str,
+def _report_to_markdown(report: WeeklyReport) -> str:
+    """把数据库中的周报对象渲染成前端直接展示的 Markdown。"""
+    lines = [
+        "## AI Weekly Report",
+        "",
+        f"- Diet adherence: **{report.diet_adherence:.1f}%**",
+        f"- Training adherence: **{report.training_adherence:.1f}%**",
+    ]
+
+    if report.weight_change_kg is not None:
+        lines.append(f"- Weight change: **{report.weight_change_kg:+.1f} kg**")
+
+    if report.summary:
+        lines.extend(["", "### Summary", report.summary])
+
+    if report.recommendations:
+        lines.extend(["", "### Recommendations"])
+        lines.extend([f"{index}. {item}" for index, item in enumerate(report.recommendations, start=1)])
+
+    return "\n".join(lines)
+
+
+def _report_to_summary(report: WeeklyReport) -> ReportSummaryResponse:
+    """把周报对象转换成前端列表页需要的摘要结构。"""
+    return ReportSummaryResponse(
+        id=str(report.id),
+        week_start=report.week_start.isoformat(),
+        week_end=report.week_end.isoformat(),
+        overall_adherence=report.overall_adherence,
+        weight_change=report.weight_change_kg,
+        trend=report.get_trend(),
+        created_at=report.created_at.isoformat(),
+    )
+
+
+def _report_to_detail(report: WeeklyReport) -> ReportDetailResponse:
+    """把周报对象转换成前端详情页需要的结构。"""
+    calorie_rate = report.diet_adherence
+    if report.daily_stats:
+        valid_days = [day for day in report.daily_stats if day.target_calories > 0]
+        if valid_days:
+            calorie_rate = round(
+                sum((day.actual_calories / day.target_calories) * 100 for day in valid_days) / len(valid_days),
+                1,
+            )
+
+    return ReportDetailResponse(
+        id=str(report.id),
+        user_id=str(report.user_id),
+        week_start=report.week_start.isoformat(),
+        week_end=report.week_end.isoformat(),
+        calorie_rate=calorie_rate,
+        training_rate=report.training_adherence,
+        weight_change=report.weight_change_kg,
+        avg_protein=report.average_protein,
+        avg_carbs=report.average_carbs,
+        avg_fat=report.average_fat,
+        summary=report.summary,
+        recommendations=report.recommendations,
+        created_at=report.created_at.isoformat(),
+    )
+
+
+async def _generate_agent_insights(
+    storage: DatabaseStorage,
+    request: WeeklyReportRequest,
+    week_start: date,
+    week_end: date,
+) -> tuple[Optional[str], list[str], Optional[int], bool]:
+    """
+    调用 LangGraph 生成周报摘要和调整建议。
+
+    周报不是只看静态统计值，而是把“用户画像 + 计划目标 + 一周执行日志”
+    重新送进 Agent，让 Reflector / Adjuster 再走一遍分析链路。
+    """
+    user = await storage.get_user(request.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    plan = await storage.get_active_plan(request.user_id)
+    logs = await storage.get_user_logs(request.user_id, limit=14)
+    week_logs = [log for log in logs if week_start <= log.date <= week_end]
+
+    # 这里要把每天日志补齐“计划目标值”，这样 Reflector 才能在同一个 payload
+    # 里同时读到 actual 和 target，做偏差分析会更稳定。
+    targets_by_date = build_plan_targets(plan, week_start, week_end)
+
+    result = await run_agent(
+        user_id=request.user_id,
+        trigger=f"weekly_report:{week_start.isoformat()}",
+        user_context=build_user_context(user),
+        plan_context={
+            "plan_id": str(plan.id) if plan else request.plan_id,
+            "start_date": week_start.isoformat(),
+            "target_calories": request.stats.calorieTarget if request.stats else 0,
+            "target_protein": request.stats.avgProtein if request.stats else 0,
+            "target_carbs": request.stats.avgCarbs if request.stats else 0,
+            "target_fat": request.stats.avgFat if request.stats else 0,
+        },
+        logs=build_logs_context(week_logs, targets_by_date),
+    )
+
+    if result.get("status") != "success":
+        logger.warning("Weekly report agent run failed: %s", result.get("error"))
+        return None, [], result.get("latency_ms"), False
+
+    recommendations: list[str] = []
+    adjustment = result.get("adjustment") or {}
+    for action in adjustment.get("immediate_actions", []):
+        if isinstance(action, dict) and action.get("action"):
+            recommendations.append(str(action["action"]))
+    for suggestion in adjustment.get("behavioral_suggestions", []):
+        if isinstance(suggestion, dict) and suggestion.get("suggestion"):
+            recommendations.append(str(suggestion["suggestion"]))
+
+    # 去重是因为规则建议和 LLM 建议可能会表达同一件事。
+    unique_recommendations: list[str] = []
+    seen: set[str] = set()
+    for item in recommendations:
+        normalized = item.strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            unique_recommendations.append(normalized)
+
+    return result.get("reflection_summary"), unique_recommendations[:5], result.get("latency_ms"), True
+
+
+def _build_report_from_request(
+    request: WeeklyReportRequest,
+    week_start: date,
+    week_end: date,
+) -> WeeklyReport:
+    """
+    当数据库里缺少完整执行数据时，用前端上传的统计值兜底生成周报。
+
+    这个兜底分支保证页面不会因为日志不足而完全不可用。
+    """
+    if request.stats is None:
+        raise HTTPException(status_code=400, detail="stats is required when no stored execution data is available")
+
+    stats = request.stats
+    daily_stats = [
+        DailyStats(
+            date=week_start + timedelta(days=offset),
+            target_calories=stats.calorieTarget,
+            actual_calories=stats.calorieActual,
+            target_protein=stats.avgProtein,
+            actual_protein=stats.avgProtein,
+            target_carbs=stats.avgCarbs,
+            actual_carbs=stats.avgCarbs,
+            target_fat=stats.avgFat,
+            actual_fat=stats.avgFat,
+            training_planned=stats.trainingTotal > 0,
+            training_completed=offset < stats.trainingCompleted,
+            adherence_score=stats.calorieRate,
+        )
+        for offset in range(7)
+    ]
+
+    return WeeklyReport(
+        user_id=request.user_id,
+        plan_id=request.plan_id,
+        week_start=week_start,
+        week_end=week_end,
+        daily_stats=daily_stats,
+        average_calories=stats.calorieActual,
+        average_protein=stats.avgProtein,
+        average_carbs=stats.avgCarbs,
+        average_fat=stats.avgFat,
+        total_training_sessions=stats.trainingCompleted,
+        planned_training_sessions=stats.trainingTotal,
+        training_adherence=stats.trainingRate,
+        diet_adherence=stats.calorieRate,
+        weight_start_kg=stats.weightStart,
+        weight_end_kg=stats.weightEnd,
+    )
+
+
+async def _build_persisted_report(
+    storage: DatabaseStorage,
+    request: WeeklyReportRequest,
+    week_start: date,
+    week_end: date,
+) -> WeeklyReport:
+    """
+    优先基于数据库里的真实计划、饮食日志、体重记录生成周报。
+
+    这是最理想的分支，因为它走的是“计划 -> 执行分析 -> 周报汇总”的完整业务链路。
+    """
+    plan = await storage.get_active_plan(request.user_id)
+    logs = await storage.get_user_logs(request.user_id, limit=30)
+    weights = await storage.get_weight_by_date_range(request.user_id, week_start, week_end)
+
+    week_logs = [log for log in logs if week_start <= log.date <= week_end]
+
+    if plan and week_logs:
+        analysis_service = ExecutionAnalysisService()
+        report_service = ReportService()
+        plan_days = [day for day in plan.days if week_start <= day.date <= week_end]
+        plan_by_date = {day.date: day for day in plan_days}
+        analyses = [
+            analysis_service.analyze_day(plan_by_date[log.date], log)
+            for log in week_logs
+            if log.date in plan_by_date
+        ]
+
+        if analyses:
+            weight_start = weights[0].weight_kg if weights else None
+            weight_end = weights[-1].weight_kg if weights else None
+            return report_service.generate_weekly_report(
+                user_id=request.user_id,
+                plan=plan,
+                analyses=analyses,
+                week_start=week_start,
+                weight_start=weight_start,
+                weight_end=weight_end,
+            )
+
+    return _build_report_from_request(request, week_start, week_end)
+
+
+@router.post("/weekly", response_model=WeeklyReportResponse)
+async def generate_weekly_report(
+    request: WeeklyReportRequest,
     db: AsyncSession = Depends(get_db),
-) -> ReportDetailResponse:
-    """
-    Get a historical weekly report by ID.
-    获取历史周报详情
-    """
-    # Import historical data
-    from app.data.historical_reports import HISTORICAL_REPORTS
-    
-    # Check cache first
-    if report_id in _report_cache:
-        cached = _report_cache[report_id]
-        return ReportDetailResponse(**cached)
-    
-    # Find report by ID from historical data
-    for report in HISTORICAL_REPORTS:
-        if report["id"] == report_id:
-            return ReportDetailResponse(**report)
-    
-    raise HTTPException(status_code=404, detail="Report not found")
+) -> WeeklyReportResponse:
+    """生成周报、落库，并返回前端可直接展示的结果。"""
+    storage = DatabaseStorage(db)
+    week_start, week_end = _week_bounds(request.week_start)
+
+    report = await _build_persisted_report(storage, request, week_start, week_end)
+    summary, recommendations, latency_ms, agent_used = await _generate_agent_insights(
+        storage,
+        request,
+        week_start,
+        week_end,
+    )
+
+    if summary:
+        report.summary = summary
+    if recommendations:
+        report.recommendations = recommendations
+
+    persisted = await storage.upsert_weekly_report(report)
+    return WeeklyReportResponse(
+        report_id=str(persisted.id),
+        report=_report_to_markdown(persisted),
+        generated_at=persisted.created_at.date().isoformat(),
+        agent_used=agent_used,
+        latency_ms=latency_ms,
+    )
 
 
 @router.get("/user/{user_id}", response_model=list[ReportSummaryResponse])
@@ -306,38 +351,44 @@ async def list_user_reports(
     user_id: str,
     db: AsyncSession = Depends(get_db),
 ) -> list[ReportSummaryResponse]:
-    """
-    List all historical reports for a user.
-    列出用户的所有历史周报
-    """
-    from app.data.historical_reports import HISTORICAL_REPORTS
-    
-    # Convert to summary format
-    summaries = [
-        ReportSummaryResponse(
-            id=r["id"],
-            week_start=r["week_start"],
-            week_end=r["week_end"],
-            overall_adherence=r["overall_adherence"],
-            weight_change=r["weight_change"],
-            trend=r["trend"],
-            created_at=r["created_at"],
-        )
-        for r in HISTORICAL_REPORTS
-    ]
-    
-    return summaries
+    """查询用户历史周报列表。"""
+    storage = DatabaseStorage(db)
+    if not await storage.get_user(user_id):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    reports = await storage.get_user_weekly_reports(user_id)
+    return [_report_to_summary(report) for report in reports]
 
 
 @router.get("/user/{user_id}/weights")
 async def get_user_weight_history(
     user_id: str,
+    start: Optional[date] = Query(default=None),
+    end: Optional[date] = Query(default=None),
     db: AsyncSession = Depends(get_db),
-) -> list[dict]:
-    """
-    Get weight history for a user (for charts).
-    获取用户体重历史（用于图表）
-    """
-    from app.data.historical_reports import WEIGHT_HISTORY
-    
-    return WEIGHT_HISTORY
+) -> list[dict[str, Any]]:
+    """返回体重历史，用于前端趋势图。"""
+    storage = DatabaseStorage(db)
+    if not await storage.get_user(user_id):
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if start and end:
+        weights = await storage.get_weight_by_date_range(user_id, start, end)
+    else:
+        weights = await storage.get_user_weight_logs(user_id, limit=90)
+        weights = list(reversed(weights))
+
+    return [{"date": weight.date.isoformat(), "value": weight.weight_kg} for weight in weights]
+
+
+@router.get("/{report_id}", response_model=ReportDetailResponse)
+async def get_report_by_id(
+    report_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> ReportDetailResponse:
+    """按周报 ID 查询详情。"""
+    storage = DatabaseStorage(db)
+    report = await storage.get_weekly_report(report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return _report_to_detail(report)

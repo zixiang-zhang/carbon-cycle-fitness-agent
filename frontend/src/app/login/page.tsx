@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { authApi } from "@/lib/api";
+import { userStorage } from "@/lib/storage";
 
 export default function LoginPage() {
     const [email, setEmail] = useState("");
@@ -20,10 +21,12 @@ export default function LoginPage() {
         try {
             const response = await authApi.login({ email, password });
 
-            // Store token and user info
-            localStorage.setItem("auth_token", response.access_token);
-            localStorage.setItem("user_id", response.user_id);
-            localStorage.setItem("user_name", response.user_name);
+            userStorage.set({
+                id: response.user_id,
+                name: response.user_name,
+                email,
+                token: response.access_token,
+            });
 
             // Broadcast login event if needed or just redirect
             window.location.href = "/";

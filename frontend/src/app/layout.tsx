@@ -27,10 +27,7 @@ export default function RootLayout({
 
   const handleLogout = () => {
     if (typeof window !== "undefined" && confirm("确定要退出账户吗？")) {
-      localStorage.removeItem("auth_token");
-      localStorage.removeItem("user_id");
-      localStorage.removeItem("user_name");
-      userStorage.clearUserId();
+      userStorage.clear();
       window.location.href = "/login";
     }
   };

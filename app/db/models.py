@@ -298,3 +298,29 @@ class WeightLogModel(Base):
     user = relationship("UserModel", back_populates="weight_logs")
 
 
+class WeeklyReportModel(Base):
+    """SQLAlchemy model for persisted weekly reports."""
+
+    __tablename__ = "weekly_reports"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    plan_id = Column(String(36), ForeignKey("plans.id", ondelete="SET NULL"), nullable=True)
+    week_start = Column(Date, nullable=False, index=True)
+    week_end = Column(Date, nullable=False)
+    daily_stats = Column(JSON, default=list)
+    average_calories = Column(Float, default=0)
+    average_protein = Column(Float, default=0)
+    average_carbs = Column(Float, default=0)
+    average_fat = Column(Float, default=0)
+    total_training_sessions = Column(Integer, default=0)
+    planned_training_sessions = Column(Integer, default=0)
+    training_adherence = Column(Float, default=0)
+    diet_adherence = Column(Float, default=0)
+    weight_start_kg = Column(Float, nullable=True)
+    weight_end_kg = Column(Float, nullable=True)
+    summary = Column(Text, nullable=True)
+    recommendations = Column(JSON, default=list)
+    created_at = Column(DateTime, default=datetime.now)
+
+

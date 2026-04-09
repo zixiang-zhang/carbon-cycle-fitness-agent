@@ -11,6 +11,7 @@ from typing import Optional
 from uuid import UUID
 
 from app.core.logging import get_logger
+from app.agent.context import build_user_context
 from app.models.plan import (
     CarbonCyclePlan,
     DayPlan,
@@ -313,26 +314,17 @@ class CarbonStrategyService:
         Returns:
             Complete CarbonCyclePlan with AI-generated notes.
         """
-        # Step 1: Generate base plan using rules (no enrichment yet)
+        # Step 1: generate a deterministic base plan from user stats and the
+        # carbon-cycle rules. This guarantees the core numbers are stable even
+        # if the LLM later fails.
         base_plan = await self.generate_plan(user, request, use_agent=False)
-        
-        # Step 2: Call Agent with create_plan trigger
+
+        # Step 2: call the LangGraph planner so the user gets higher-level
+        # strategy notes in addition to the deterministic day-level numbers.
         try:
             from app.agent import run_agent
-            
-            user_context = {
-                "user_id": str(user.id),
-                "name": user.name,
-                "goal": user.goal.value if hasattr(user.goal, "value") else str(user.goal),
-                "weight_kg": user.weight_kg,
-                "height_cm": user.height_cm,
-                "tdee": user.calculate_tdee(),
-                "age": user.calculate_age(),
-                "gender": user.gender.value if hasattr(user.gender, "value") else str(user.gender),
-                "activity_level": user.activity_level.value if hasattr(user.activity_level, "value") else str(user.activity_level),
-                "training_days": user.training_days_per_week,
-            }
-            
+
+            user_context = build_user_context(user)
             plan_context = {
                 "plan_id": str(base_plan.id),
                 "start_date": str(base_plan.start_date),
@@ -352,7 +344,7 @@ class CarbonStrategyService:
                 logs=[],  # No historical logs for new plan
             )
             
-            # Step 3: Extract Planner output and merge into plan
+            # Step 3: merge the planner's human-readable advice into the plan.
             if result.get("status") == "success":
                 planner_output = result.get("planner_output", {})
                 raw_response = planner_output.get("raw_response", "")
@@ -371,7 +363,7 @@ class CarbonStrategyService:
             logger.error(f"Agent call failed: {e}")
             # Continue with base plan if agent call fails
         
-        # Step 4: Use enrichment service for detailed day descriptions
+        # Step 4: enrich each day with training / diet text shown in the UI.
         try:
             from app.services.plan_enrichment import PlanEnrichmentService
             enrichment_service = PlanEnrichmentService()

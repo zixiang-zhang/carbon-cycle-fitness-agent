@@ -1,9 +1,8 @@
 """
-Report generation service.
-报告生成服务
+周报生成服务。
 
-Aggregates weekly data and generates summary reports.
-汇总周数据并生成摘要报告
+职责是把每日分析结果汇总成周粒度报告，
+供周报页展示和历史查询使用。
 """
 
 from datetime import date, timedelta
@@ -11,7 +10,6 @@ from typing import Optional
 from uuid import UUID
 
 from app.core.logging import get_logger
-from app.models.log import DietLog
 from app.models.plan import CarbonCyclePlan
 from app.models.report import DailyStats, WeeklyReport
 from app.services.execution_analysis import DailyAnalysis
@@ -20,10 +18,10 @@ logger = get_logger(__name__)
 
 
 class ReportService:
-    """Service for generating weekly and periodic reports."""
+    """负责把日分析结果聚合成周报对象。"""
 
     def build_daily_stats(self, analysis: DailyAnalysis) -> DailyStats:
-        """Convert daily analysis to stats."""
+        """把单日分析结果转换成周报中的 DailyStats。"""
         return DailyStats(
             date=analysis.date,
             target_calories=analysis.calories.target,
@@ -34,7 +32,7 @@ class ReportService:
             actual_carbs=analysis.carbs.actual,
             target_fat=analysis.fat.target,
             actual_fat=analysis.fat.actual,
-            training_planned=not analysis.training_deviation or True,
+            training_planned=analysis.training_planned,
             training_completed=not analysis.training_deviation,
             adherence_score=analysis.adherence_score,
         )
@@ -48,11 +46,16 @@ class ReportService:
         weight_start: Optional[float] = None,
         weight_end: Optional[float] = None,
     ) -> WeeklyReport:
-        """Generate weekly summary report."""
+        """
+        根据一周的分析结果生成周报对象。
+
+        这里不负责调用 Agent，只做统计汇总：
+        平均摄入、训练完成率、饮食达标率、体重变化等。
+        """
         week_end = week_start + timedelta(days=6)
-        
+
         daily_stats = [self.build_daily_stats(a) for a in analyses]
-        
+
         if daily_stats:
             avg_cal = sum(s.actual_calories for s in daily_stats) / len(daily_stats)
             avg_protein = sum(s.actual_protein for s in daily_stats) / len(daily_stats)
